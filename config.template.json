@@ -1,0 +1,24 @@
+{
+  "_comment": "Per-device config for the the band auto-editor. Copy to config.json and fill in. All scripts read this so no paths are hardcoded. Run 'set up the auto-editor' in claude to generate it via the questionnaire.",
+  "band": "YOUR_HANDLE",
+
+  "ffmpeg": "AUTODETECT_OR_PATH/ffmpeg.exe",
+  "ffprobe": "AUTODETECT_OR_PATH/ffprobe.exe",
+  "python": "AUTODETECT_OR_PATH/python.exe",
+
+  "gigs_dir": "PATH/to/your/gig footage folders",
+  "work_dir": "PATH/to/_work (intermediate files; created if missing)",
+
+  "use_capcut": true,
+  "capcut_draft_root": "PATH/to/CapCut/User Data/Projects/com.lveditor.draft (or null if use_capcut=false -> MP4 only)",
+
+  "reuse_research": true,
+  "style_model": "style_model.json",
+  "effects_lib": "effects_lab.py",
+
+  "defaults": {
+    "target_seconds": 80,
+    "effect_intensity": "tasteful",
+    "output_preview": true
+  }
+}

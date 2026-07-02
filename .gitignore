@@ -1,0 +1,34 @@
+# per-device / private
+config.json
+# large media & intermediates (footage, reels, renders, drafts, audio)
+_reels/*.mp4
+_reels/**/*.mp4
+_work/
+_auto_output/
+*.mp4
+*.mov
+*.MOV
+*.wav
+*.m4a
+*.bin
+# python
+__pycache__/
+*.pyc
+# keep these despite rules above
+!config.template.json
+!style_model.json
+!*.research.json
+# band-specific research data & personal docs (not for the public generic tool)
+HANDOFF.md
+PLAN.md
+ig_research.json
+style_profile.json
+capcut_effects_catalog.json
+effects_lab_report.md
+effects_validation.jpg
+_reels/
+run_gig.ps1
+# instance-level codex data (contains band reel names + performance frames)
+effect_codex.json
+effects_match_*.jpg
+_codex_frames/

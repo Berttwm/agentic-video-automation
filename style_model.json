@@ -1,0 +1,134 @@
+{
+ "generated": "2026-07-02",
+ "measured_from": {
+  "reels": 8,
+  "cut_events": 40,
+  "effect_events": 417
+ },
+ "cadence": {
+  "cuts_per_min_median": 2.0,
+  "tempo_median": 130.0
+ },
+ "cut_grammar": {
+  "on_downbeat_rate": 0.07,
+  "at_energy_drop_rate": 0.6,
+  "at_phrase_resolution_rate": 0.33,
+  "rule": "snap every cut to the nearest DOWNBEAT; prefer cuts at a phrase RESOLUTION or an energy DROP"
+ },
+ "effect_grammar": {
+  "at_drop_rate": 0.53,
+  "on_hit_rate": 0.92,
+  "rules": {
+   "whip_transition": {
+    "trigger": "section change / energy drop, on a downbeat",
+    "envelope": "motion-blur builds into the cut then resolves",
+    "capcut": "Blur/Mix transition"
+   },
+   "shake": {
+    "trigger": "a strong HIT on a downbeat (chorus/solo accent)",
+    "envelope": "ramp 0->peak->0 over ~1s (keyframed)",
+    "intensity": 0.4,
+    "capcut": "Shake 2"
+   },
+   "blur/zoom": {
+    "trigger": "a DROP or the moment of impact after a build",
+    "envelope": "ramp up over the build, release after",
+    "intensity": 0.5,
+    "capcut": "Blur (radial approx via zoom)"
+   },
+   "light_leak_flash": {
+    "trigger": "section ENTRY right after a drop",
+    "envelope": "quick in, slow out (~1s)",
+    "capcut": "Leak 2"
+   }
+  }
+ },
+ "boundary_rules": {
+  "clip_end": "extend every clip to the next phrase RESOLUTION (energy settle on a downbeat) so it never ends mid-phrase or on an unresolved note",
+  "cut_snap": "downbeat",
+  "song_end": "must end on a resolution (final chord/decay), never a hard chop"
+ },
+ "tempo_aware_selection": {
+  "note": "choose transition/effect family by song tempo & mood (external best-practice)",
+  "fast_gt_120bpm": {
+   "transitions": [
+    "whip/Blur",
+    "Mix"
+   ],
+   "effects": [
+    "Shake 2",
+    "flash/Leak 2"
+   ]
+  },
+  "slow_le_120bpm": {
+   "transitions": [
+    "cross-dissolve",
+    "Blur"
+   ],
+   "effects": [
+    "subtle Blur",
+    "light leak"
+   ]
+  }
+ },
+ "techniques": {
+  "speed_ramp": "on dynamic beats / into a drop, ramp speed (slow->fast or fast->slow) in time with the track - high impact for band footage, was unused",
+  "key_moments_only": "effects/flashy transitions ONLY on key moments (drop/solo/final chorus) - over-syncing looks amateurish"
+ },
+ "best_practices": [
+  "Effects earn their place: only on a real musical event (drop/hit/build/section change), never on a timer",
+  "Every effect ramps in and out (keyframed) matching the build/release of the moment - no instant pops",
+  "Cut on the DOWNBEAT for major cuts; don't cut every beat; let phrases finish before cutting",
+  "Pick transitions by mood: whip/shake/flash for fast rock, cross-dissolve/blur for slow",
+  "Speed ramps on dynamic beats add energy without more footage",
+  "Density stays near the reel corpus median; restraint in verses, punch in choruses/solo",
+  "Effects support the music, never distract; grade > discrete effects for the overall look"
+ ],
+ "best_practice_sources": [
+  "editorskeys.com - how to edit music videos like a pro",
+  "beat2cut.com - beat-sync video editing guide",
+  "capcut.com - concert editing (upscale, lighting, synced transitions/text)"
+ ],
+ "capcut_catalog": {
+  "effects_available": [
+   "Leak 2",
+   "Disco Ball 1",
+   "Blur",
+   "Cutout Poster",
+   "Shake",
+   "Wireframe",
+   "Shake 2"
+  ],
+  "transitions_available": [
+   "Up",
+   "Slide",
+   "Down",
+   "Right",
+   "Top Right",
+   "Superimpose",
+   "Sliding Memories",
+   "Fold Over",
+   "Mix",
+   "Blur",
+   "Twinkle Zoom",
+   "Bottom Right",
+   "Bottom Left",
+   "Horizontal Lines",
+   "Floodlight"
+  ]
+ },
+ "automation_framework": {
+  "source": "beat-matching auto-edit research (arXiv 2303.01884 AutoMatch, 2506.18881), USPTO beat-decomposition patents, industry AI editors (OpusClip/Canva/VSDC/Filmora)",
+  "hit_detection": "SPECTRAL FLUX onset strength (sum of positive per-band magnitude increases) = precise accents for effect triggers; better than raw RMS",
+  "beat_grid": "build beat grid (onset->tempo->beat tracking); QUANTIZE every cut & effect onset to the grid",
+  "tiered_quantization": {
+   "beat": "subtle/small effects",
+   "bar": "shot changes",
+   "phrase": "transitions",
+   "section_or_drop": "MAJOR transitions + big effects (whip/flash/speed-ramp)"
+  },
+  "arousal_density": "scale effect DENSITY + INTENSITY with section energy (arousal): restraint in low-energy verses, punch in chorus/solo",
+  "transition_by_content_change": "pick transition by shot content-change magnitude (big->whip/cut, small->dissolve)",
+  "motion_energy": "optional: rank video moments by frame-to-frame motion energy to pick salient angles/moments"
+ }
+}
