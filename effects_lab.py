@@ -466,6 +466,7 @@ def enforce_density(placements, global_min_spacing=1.2):
             kept.append(p)
             last_any = p["tl_start"]
             last_by[p["effect"]] = p["tl_start"]
+            count_by[p["effect"]] = count_by.get(p["effect"], 0) + 1   # enforce corpus max_per_edit
     return kept
 
 

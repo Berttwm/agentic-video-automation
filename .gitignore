@@ -32,3 +32,5 @@ run_gig.ps1
 effect_codex.json
 effects_match_*.jpg
 _codex_frames/
+
+*.stackdump
