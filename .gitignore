@@ -32,5 +32,10 @@ run_gig.ps1
 effect_codex.json
 effects_match_*.jpg
 _codex_frames/
+# derived placement rationale (contains band reel names / per-instance context)
+effect_rationale.json
+effect_rationale.md
 
 *.stackdump
+# gig-overview (whole-gig recap) research + plan — references band reels/venues
+gig_overview_plan.md

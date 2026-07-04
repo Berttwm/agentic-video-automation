@@ -41,8 +41,10 @@ from __future__ import annotations
 import sys, os, json, subprocess, tempfile, argparse, shutil
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "shared"))
 import render_preview_fx_v2 as RV   # reuse the exact gated effect builders
 import effects_lab as EL
+import av_sync, camera_match         # SHARED correctness devices (also used by the overview renderer)
 
 
 def run(ff_cmd, what):
@@ -76,9 +78,12 @@ def main():
 
     plan = json.load(open(os.path.join(WORK, "edit_plan.json"), encoding="utf-8"))
     shots = plan["shots"]
+    for sh in shots:                                  # SHARED FIX: frame-align durations so the
+        sh["dur"] = av_sync.frame_align(sh["dur"], FPS)   # video length matches the sample-exact audio
     angles = plan["angles"]
     master_path = angles["master"]["path"]
     master_off = float(angles["master"].get("offset", 0.0))
+    CM = camera_match.correction_filter(WORK)         # SHARED: drummer-cam -> master-cam colour match
 
     effects = sorted(plan.get("effects", []), key=lambda f: f["tl_start"])
     scratch = tempfile.mkdtemp(prefix="rtlfx_")
@@ -93,28 +98,32 @@ def main():
     # A shot is a single continuous decode of its angle source at angle_start_abs for `dur`. Effects
     # whose window falls inside the shot are baked as TIME-GATED (shot-relative) filters over that one
     # decode. No audio in the video path (-an) -> audio can never be spliced by an effect.
-    def render_shot_video(sh, si, with_fx, out_mp4):
+    def render_shot_video(sh, si, with_fx, out_mp4, pre=0.0):
+        # `pre` = pre-roll seconds rendered BEFORE the shot start, so this shot and the previous one in the
+        # run cover the SAME master moment -> the angle-switch xfade is a MULTICAM dissolve (both cameras,
+        # same instant) that stays smooth and does NOT time-compress (the xfade consumes exactly `pre`).
         angle = sh.get("angle", "master")
         src = angles[angle]["path"]
-        src_start = sh.get("angle_start_abs", sh["master_start_abs"])
-        dur = float(sh["dur"])
+        fit = FIT + (("," + CM) if (angle != "master" and CM) else "")   # SHARED camera-match on non-master
+        shot_dur = float(sh["dur"])
+        src_start = float(sh.get("angle_start_abs", sh["master_start_abs"])) - pre
+        dur = shot_dur + pre
         tl0 = float(sh["tl_start"])
-        # effects whose START lands within this shot's timeline window
-        fxs = [f for f in effects if tl0 - 1e-6 <= f["tl_start"] < tl0 + dur - 1e-6] if with_fx else []
+        # effects whose START lands within this shot's timeline window (unaffected by the pre-roll)
+        fxs = [f for f in effects if tl0 - 1e-6 <= f["tl_start"] < tl0 + shot_dur - 1e-6] if with_fx else []
 
         inp = ["-ss", "%.4f" % max(src_start, 0.0), "-i", src, "-t", "%.4f" % dur]
         if not fxs:
-            graph = "[0:v]%s,setsar=1[vout]" % FIT
+            graph = "[0:v]%s,setsar=1[vout]" % fit
         else:
             # chain: FIT first, then each gated effect graph in sequence. Every gated builder is a
             # self-contained vf/fc; we keep to 'vf' builders (all placed effects are vf) and chain them,
             # each time-gated shot-relative so it fires only on its moment and passes through elsewhere.
-            chain = FIT
+            chain = fit
             for f in fxs:
                 name = f["effect"]
                 envd = float(f.get("envelope_duration") or EL.TRIGGER_RULES[name]["envelope_duration"])
-                m_centre = (f["tl_start"] - tl0) + envd / 2.0        # shot-relative window centre
-                m0 = max(0.0, m_centre - envd / 2.0)
+                m0 = max(0.0, (f["tl_start"] - tl0) + pre)           # window start (shifted by the pre-roll)
                 if m0 + envd > dur:
                     m0 = max(0.0, dur - envd)
                 shape = f.get("envelope")                            # pulse_hold / stab_hold / etc.
@@ -141,58 +150,80 @@ def main():
     FADE_IN = float(plan.get("fade_in_s", 0.8) or 0.8)
     FADE_OUT = 0.8        # ride only the last ~0.8s so the extended final note still rings out
 
-    def overlaps():
-        """overlap seconds for each of the N-1 boundaries, capped to <=40% of the shorter neighbour."""
-        ov = []
-        for i in range(1, len(shots)):
-            want = OV_JOIN if shots[i].get("is_join") else OV_DISSOLVE
-            cap = 0.40 * min(float(shots[i - 1]["dur"]), float(shots[i]["dur"]))
-            ov.append(max(0.10, min(want, cap)))
-        return ov
-    OVS = overlaps()
+    # Group shots into contiguous RUNS: a JOIN (a real forward skip) starts a new run; a non-join
+    # boundary (an angle switch on continuous audio) stays INSIDE the run. Within a run the audio is one
+    # continuous master extract and the video is a HARD CUT between angles -> a contiguous switch can
+    # never replay/compress a beat (the "doubling of 1 count"). We cross-dissolve ONLY at the joins.
+    RUNS = [[0]]
+    for i in range(1, len(shots)):
+        (RUNS.append([i]) if shots[i].get("is_join") else RUNS[-1].append(i))
+
+    def _run_dur(run):
+        return sum(float(shots[i]["dur"]) for i in run)
+
+    JOIN_OVS = []  # cross-dissolve overlap for each run->run (join) boundary, capped to 40% of shorter run
+    for r in range(1, len(RUNS)):
+        cap = 0.40 * min(_run_dur(RUNS[r - 1]), _run_dur(RUNS[r]))
+        JOIN_OVS.append(av_sync.frame_align(max(0.10, min(OV_JOIN, cap)), FPS))  # frame-align the xfade overlap
+
+    def _run_master_start(run):
+        s0 = shots[run[0]]; angle = s0.get("angle", "master")
+        if angle == "master":
+            return float(s0["master_start_abs"])
+        return float(s0.get("angle_start_abs", s0["master_start_abs"])) - float(angles[angle].get("offset", 0.0))
+
+    OV_SWITCH = 0.35   # multicam cross-dissolve overlap between angles WITHIN a run (video only)
 
     def build_video(with_fx, tag):
-        # 1) render each shot once (fx baked, full dur -- overlaps are consumed by xfade, not by trims)
-        seg_files = []
-        for si, sh in enumerate(shots):
-            seg = os.path.join(scratch, "%s_shot_%02d.mp4" % (tag, si))
-            render_shot_video(sh, si, with_fx, seg)
-            seg_files.append(seg)
+        # Per run: render shot 0 normally, each later shot with an OV_SWITCH PRE-ROLL, then xfade the shots
+        # -> a MULTICAM dissolve (both angles at the SAME instant): smooth flow AND no time-compression, so
+        # the run video length == the continuous-audio run. Runs are then cross-dissolved at the joins.
+        run_vids, run_durs = [], []
+        for r, rn in enumerate(RUNS):
+            run_durs.append(_run_dur(rn))
+            svs = []
+            for k, si in enumerate(rn):
+                pre = 0.0 if k == 0 else OV_SWITCH
+                seg = os.path.join(scratch, "%s_shot_%02d.mp4" % (tag, si))
+                render_shot_video(shots[si], si, with_fx, seg, pre=pre)
+                svs.append(seg)
+            if len(svs) == 1:
+                run_vids.append(svs[0]); continue
+            rv = os.path.join(scratch, "%s_run_%02d.mp4" % (tag, r))
+            inputs = []
+            for seg in svs:
+                inputs += ["-i", seg]
+            parts = ["[%d:v]setpts=PTS-STARTPTS[rv%d]" % (i, i) for i in range(len(svs))]
+            cur = "[rv0]"; acc = float(shots[rn[0]]["dur"])
+            for i in range(1, len(svs)):
+                off = acc - OV_SWITCH; out = "[rx%d]" % i
+                parts.append("%s[rv%d]xfade=transition=fade:duration=%.3f:offset=%.3f%s"
+                             % (cur, i, OV_SWITCH, off, out))
+                cur = out; acc = acc + float(shots[rn[i]]["dur"])
+            run([FF, "-v", "error", *inputs, "-filter_complex", ";".join(parts), "-map", cur, "-an",
+                 *CV, "-y", rv], "%s run %d multicam-dissolve" % (tag, r))
+            run_vids.append(rv)
         vid = os.path.join(scratch, "%s_video.mp4" % tag)
-        # 2) single filter_complex: xfade-chain all shots, then fade-in-from-black + fade-out-to-black.
-        if len(seg_files) == 1:
-            dur0 = float(shots[0]["dur"])
-            fc = ("[0:v]setpts=PTS-STARTPTS,fade=t=in:st=0:d=%.3f,"
-                  "fade=t=out:st=%.3f:d=%.3f[vout]"
-                  % (FADE_IN, max(0.0, dur0 - FADE_OUT), FADE_OUT))
-            inputs = ["-i", seg_files[0]]
+        if len(run_vids) == 1:
+            fc = ("[0:v]setpts=PTS-STARTPTS,fade=t=in:st=0:d=%.3f,fade=t=out:st=%.3f:d=%.3f[vout]"
+                  % (FADE_IN, max(0.0, run_durs[0] - FADE_OUT), FADE_OUT))
+            inputs = ["-i", run_vids[0]]
         else:
             inputs = []
-            for p in seg_files:
+            for p in run_vids:
                 inputs += ["-i", p]
-            parts = []
-            for i in range(len(seg_files)):
-                parts.append("[%d:v]setpts=PTS-STARTPTS[v%d]" % (i, i))
-            # accumulate xfade offsets: boundary k fires at (sum dur 0..k) - (sum overlaps 0..k)
-            cur = "[v0]"
-            acc = float(shots[0]["dur"])
-            total = float(shots[0]["dur"])
-            for i in range(1, len(seg_files)):
-                ov = OVS[i - 1]
-                off = acc - ov
-                trans = "fade"                              # cross-DISSOLVE on every seam (video blend)
-                out = "[x%d]" % i
-                parts.append("%s[v%d]xfade=transition=%s:duration=%.3f:offset=%.3f%s"
-                             % (cur, i, trans, ov, off, out))
-                cur = out
-                acc = acc + float(shots[i]["dur"]) - ov     # chain length after this xfade
-                total = acc
-            # fades on the final blended stream
+            parts = ["[%d:v]setpts=PTS-STARTPTS[v%d]" % (i, i) for i in range(len(run_vids))]
+            cur = "[v0]"; acc = run_durs[0]
+            for i in range(1, len(run_vids)):
+                ov = JOIN_OVS[i - 1]; off = acc - ov; out = "[x%d]" % i
+                parts.append("%s[v%d]xfade=transition=fade:duration=%.3f:offset=%.3f%s"
+                             % (cur, i, ov, off, out))
+                cur = out; acc = acc + run_durs[i] - ov
             parts.append("%sfade=t=in:st=0:d=%.3f,fade=t=out:st=%.3f:d=%.3f[vout]"
-                         % (cur, FADE_IN, max(0.0, total - FADE_OUT), FADE_OUT))
+                         % (cur, FADE_IN, max(0.0, acc - FADE_OUT), FADE_OUT))
             fc = ";".join(parts)
         run([FF, "-v", "error", *inputs, "-filter_complex", fc, "-map", "[vout]", "-an",
-             *CV, "-y", vid], "%s video xfade-chain" % tag)
+             *CV, "-y", vid], "%s video run-xfade" % tag)
         return vid
 
     # ------------------------------------------------------------------ AUDIO: build ONCE, shared
@@ -200,46 +231,34 @@ def main():
     # back to master time via its offset). Segments are concatenated into ONE continuous stream and
     # loudnorm'd ONCE. This exact wav is muxed into BOTH outputs -> audio is bit-identical.
     def build_audio():
-        # per-shot MASTER-time segments (full dur -- overlaps consumed by acrossfade, same as video)
-        seg_files = []
-        for si, sh in enumerate(shots):
-            dur = float(sh["dur"])
-            angle = sh.get("angle", "master")
-            if angle == "master":
-                master_time = sh["master_start_abs"]
-            else:
-                # angle_start_abs is in the angle's source clock; master time = angle_time - angle_offset
-                master_time = sh.get("angle_start_abs", sh["master_start_abs"]) - float(angles[angle].get("offset", 0.0))
-            seg = os.path.join(scratch, "aud_%02d.wav" % si)
-            run([FF, "-v", "error", "-ss", "%.4f" % max(master_time, 0.0), "-i", master_path,
-                 "-t", "%.4f" % dur, "-vn", "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le",
-                 "-y", seg], "audio seg %d" % si)
-            seg_files.append(seg)
-        # chain segments with acrossfade over the SAME per-boundary overlaps as the video xfade, so the
-        # audio bed shortens by exactly the same amount at each seam and A/V stay locked. acrossfade
-        # superimposes (equal-power tri) rather than hard-splicing -> crackle-free at every join.
+        # ONE continuous master extract per RUN. Angle switches live INSIDE a run, so there is NO
+        # acrossfade there -> a beat can never be replayed/compressed (the doubling bug). Runs are
+        # acrossfaded only at the JOIN seams (qsin = constant power, no volume dip). Same JOIN_OVS as the
+        # video, so A/V shorten by the same amount at each join and stay locked.
+        run_segs = []
+        for r, rn in enumerate(RUNS):
+            mstart = _run_master_start(rn)
+            seg = os.path.join(scratch, "aud_run_%02d.wav" % r)
+            run([FF, "-v", "error", "-ss", "%.4f" % max(mstart, 0.0), "-i", master_path,
+                 "-t", "%.4f" % _run_dur(rn), "-vn", "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le",
+                 "-y", seg], "audio run %d" % r)
+            run_segs.append(seg)
         raw = os.path.join(scratch, "aud_bed.wav")
-        if len(seg_files) == 1:
-            shutil.copyfile(seg_files[0], raw)
+        if len(run_segs) == 1:
+            shutil.copyfile(run_segs[0], raw)
         else:
             inputs = []
-            for p in seg_files:
+            for p in run_segs:
                 inputs += ["-i", p]
-            parts = []
-            for i in range(len(seg_files)):
-                parts.append("[%d:a]aresample=48000,asetpts=PTS-STARTPTS[a%d]" % (i, i))
+            parts = ["[%d:a]aresample=48000,asetpts=PTS-STARTPTS[a%d]" % (i, i) for i in range(len(run_segs))]
             cur = "[a0]"
-            for i in range(1, len(seg_files)):
-                ov = OVS[i - 1]
+            for i in range(1, len(run_segs)):
                 out = "[ax%d]" % i
-                # qsin = constant-POWER curve (gain_out^2 + gain_in^2 = 1): incoming/outgoing audio
-                # sum to a flat loudness through the seam -> no mid-crossfade volume dip. (tri is
-                # linear and DIPS when blending two different signals -- reviewers heard that dip.)
-                parts.append("%s[a%d]acrossfade=d=%.3f:c1=qsin:c2=qsin%s" % (cur, i, ov, out))
+                parts.append("%s[a%d]acrossfade=d=%.3f:c1=qsin:c2=qsin%s" % (cur, i, JOIN_OVS[i - 1], out))
                 cur = out
             fc = ";".join(parts)
             run([FF, "-v", "error", *inputs, "-filter_complex", fc, "-map", cur,
-                 "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", "-y", raw], "audio acrossfade-chain")
+                 "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", "-y", raw], "audio run acrossfade-chain")
         # fade the audio bed in/out to match the video's fade-from/to-black (same windows)
         adur = probe_dur(FP, raw)
         faded = os.path.join(scratch, "aud_bed_faded.wav")
@@ -265,6 +284,8 @@ def main():
     print("=== rendering FX video (%d effects baked, gated, video-only) ===" % len(effects), flush=True)
     fx_video = build_video(with_fx=True, tag="fx")
     mux(fx_video, OUT, "preview")
+    v, a, drift, ok = av_sync.verify_av(FP, OUT, FPS)   # SHARED A/V-lock check
+    print("  A/V lock: video %.3fs / audio %.3fs / drift %.1f frame(s) [%s]" % (v, a, drift, "OK" if ok else "DRIFT"), flush=True)
 
     if A.baseline:
         print("=== rendering NO-EFFECTS baseline video (same shots, same audio) ===", flush=True)
